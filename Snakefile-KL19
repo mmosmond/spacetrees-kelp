@@ -21,15 +21,23 @@ Ms = [100] #number of importance samples at each locus
 trees_per_chr = [5028, 4654, 4275, 4897, 2637, 4017, 1937, 3420, 3030, 2131, 2510,
        3571, 2710, 1090, 2632, 3396, 1732, 2010,  981, 2091, 2265, 2846,
               3341, 2158, 3115, 3288, 2635, 1012, 2135, 1471,  992, 1860, 1180] #calculated in plots.ipynb
-treeskip = 10000 #number of trees to skip along genome (thinning)
+treeskip = 100 #number of trees to skip along genome (thinning)
 sampled_trees_per_chr = [len(range(0,i,treeskip)) for i in trees_per_chr] #number of sampled trees per chr
 CHRS_rep = []
 sampled_trees_chr = []
 for i in range(len(CHRS)):
   CHRS_rep += [CHRS[i]] * sampled_trees_per_chr[i] #chr repeated for each sampled tree, to make tuples for expand's zip
   sampled_trees_chr += [treeskip*i for i in range(sampled_trees_per_chr[i])] #sampled trees in each chr
-ancestor_times = [10, 100, 1000, 5000, 10000, 20000, 40000, 80000, 160000, 320000] #generations in the past to locate ancestors at
+ancestor_times = [10, 100, 1000, 2500, 5000, 10000, 20000, 40000, 100000, 1000000] #generations in the past to locate ancestors at
 Ts = [None] #none until time cutoff error fixed
+
+# subsamples
+set03 = []
+with open (metadata,'r') as f:
+  next(f)
+  for line in f:
+    for _ in range(2):
+      set03.append(int(line.split()[-1]))
 
 # ---------------- unzip all anc/mut files ------------------------------
 
@@ -132,8 +140,8 @@ rule sample_trees:
 
 # now we will extract the information we need from the trees, the shared times between each pair of lineages and the coalescence times
 
-shared_times = newick.replace('.newick','.stss')
-coal_times = newick.replace('.newick','.ctss')
+shared_times = newick.replace('.newick','{subsample}.stss')
+coal_times = newick.replace('.newick','{subsample}.ctss') #not actually subsampling because not using below
 
 rule extract_times:
   input:
@@ -179,10 +187,14 @@ rule extract_times:
             samples = [int(ts.node(node).metadata['name']) for node in ts.samples()] #get index of each sample in list we gave to relate
             sample_order = np.argsort(samples) #get indices to put in ascending order
             ordered_samples = [ts.samples()[i] for i in sample_order] #order samples as in relate
+            if wildcards.subsample == '_set03':
+              ordered_samples = [j for i,j in enumerate(ordered_samples) if set03[i]==1]
             sts = get_shared_times(tree, ordered_samples) #get shared times between all pairs of samples, with rows and columns ordered as in relate
             stss.write(",".join([str(i) for i in sts]) + '\n') #append as new line
  
             # get coalescence times 
+	    ts = ts.simplify(ordered_samples)
+	    tree = ts.first()
             cts = sorted([tree.time(i) for i in tree.nodes() if not tree.is_sample(i)]) #coalescence times, in ascending order
             ctss.write(",".join([str(i) for i in cts]) + '\n') #append as new line
 
@@ -357,6 +369,8 @@ rule locate_ancestors_blup:
     stss_inv = stss_inv_mat
     #locations 
     locations = np.loadtxt(input.locations) #location of each sample
+    if wildcards.subsample == '_set03':
+      locations = np.array([j for i,j in enumerate(locations) if set03[i]==1])
 
     # locate ancestors
     s = wildcards.s
@@ -376,88 +390,11 @@ rule locate_ancestors_blup:
       for anc_loc in ancestor_locations:
         f.write(','.join([str(int(anc_loc[0]))] + [str(i) for i in anc_loc[1:]]) + '\n') #save
 
-# ----------------------- locate samples that we forget the locations of -----------------------
-
-forgotten_locations_blup = processed_times.replace('{end}','_{s}s_{t}t.forgotten_locs')
-
-rule locate_forgotten_blup:
-  input:
-    stss = shared_times,
-    locations = locations
-  output:
-    forgotten_locations_blup
-  threads: 1
-  resources:
-    runtime=15
-  run:
-    # prevent numpy from using more than {threads} threads (useful for parallizing on my server)
-    import os
-    os.environ["OMP_NUM_THREADS"] = str(threads)
-    os.environ["GOTO_NUM_THREADS"] = str(threads)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(threads)
-    os.environ["MKL_NUM_THREADS"] = str(threads)
-    os.environ["VECLIB_MAXIMUM_THREADS"] = str(threads)
-    os.environ["NUMEXPR_NUM_THREADS"] = str(threads)
-
-    # load tools
-    import numpy as np
-    from tqdm import tqdm
-    from spacetrees import locate_ancestors
-    from utils import chop_shared_times
-
-    T = wildcards.T #get time cutoff
-    T = None if T=='None' else float(T) #format correctly
-
-    # load input data
-    #locations 
-    locations = np.loadtxt(input.locations) #location of each sample
-    n = len(locations) #number of samples
-    # shared times
-    stss = np.loadtxt(input.stss, delimiter=',') #list of vectorized shared times matrices
-    mat = np.zeros((n,n))
-    mat[np.triu_indices(n, k=0)] = stss[0] #convert to numpy matrix
-    mat = mat + mat.T - np.diag(np.diag(mat))      
-    x = np.diag(mat) #shared times with self
-    sample_times = np.max(x) - x #sampling times
-    stss_mat = [] #list of chopped shared times matrices in matrix form
-    for sts in stss:
-      sts = chop_shared_times(sts, T=T) #chop shared times to ignore history beyond T
-      mat = np.zeros((n,n))
-      #mat[np.triu_indices(k, k=1)] = sts[1:] #convert to numpy matrix
-      #mat = mat + mat.T + np.diag([sts[0]]*k)      
-      mat[np.triu_indices(n, k=0)] = sts #convert to numpy matrix
-      mat = mat + mat.T - np.diag(np.diag(mat))      
-      stss_mat.append(mat)
-    stss = stss_mat
-
-    # locate ancestors
-    s = wildcards.s.split("_")
-    if s == 'All': #an option to locate the ancestors of all samples
-      samples = range(n)   
-    else:
-      try:
-        samples = [int(s)]
-      except:
-        samples = [int(i) for i in s]
-    t = wildcards.t
-    if t == 'All': #an option to locate at pretermined list of times 
-      times = ancestor_times
-    elif t == 'None':
-      times = None
-    else: 
-      times = [float(t)]
-    ancestor_locations = locate_ancestors(samples=samples, times=times, forget_locations=True,
-                                          shared_times_chopped=stss, locations=locations, 
-                                          sample_times=sample_times, BLUP=True)
-    with open(output[0], 'a') as f:
-      for anc_loc in ancestor_locations:
-        f.write(','.join([str(int(anc_loc[0]))] + [str(i) for i in anc_loc[1:]]) + '\n') #save
-
 # ---------------- dummy rule to run everything you need -----------------
 
 rule all:
   input:
-    expand(anc, CHR=CHRS),
-    locations,
-    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, s=['All'], t=['All']),
+#    expand(anc, CHR=CHRS),
+#    locations,
+    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, s=['All'], t=['All'], subsample=['','_set03']),
 
