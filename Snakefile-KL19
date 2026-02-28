@@ -405,7 +405,8 @@ rule all:
   input:
 #    expand(anc, CHR=CHRS),
 #    locations,
-    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, subsample=['0','26','27','24','25','31','32','19','20'], shuffle=['N']),
+    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, subsample=['N','0','26','27','24','25','31','32','19','20','set03'], shuffle=['N']),
+    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, subsample=['N'], shuffle=['Y']),
 
 # i ran many things on debugjob, but the below code also worked when i had 1774 blup jobs (and associated times) to run
 # snakemake --snakefile Snakefile-KL19 --jobs 10 --group-components times=192 blups=192 --profile slurm all 
