@@ -1,4 +1,5 @@
 # pipeline to infer dispersal rates and locate genetic ancestors with spacetrees (Osmond & Coop 2024)
+import numpy as np
 
 # paths 
 datadir = 'data/' #relative path to data directory
@@ -34,12 +35,15 @@ ancestor_times = [10, 100, 1000, 2500, 5000, 10000, 20000, 40000, 100000, 100000
 Ts = [None] #none until time cutoff error fixed
 
 # subsamples
-set03 = []
+metadatas = []
 with open (metadata,'r') as f:
   next(f)
   for line in f:
     for _ in range(2):
-      set03.append(int(line.split()[-1]))
+      metadatas.append(line.split())
+set03 = [i[-1] for i in metadatas] #thinning the southern samples for more uniform spatial sampling
+pops = [i[1] for i in metadatas] #popn of each sample 
+_, pop = np.unique(pops, return_inverse=True) #unique list of popns and which popn each sample is in
 
 # ---------------- unzip all anc/mut files ------------------------------
 
@@ -142,7 +146,7 @@ rule sample_trees:
 
 # now we will extract the information we need from the trees, the shared times between each pair of lineages and the coalescence times
 
-shared_times = newick.replace('.newick','{subsample}.stss')
+shared_times = newick.replace('.newick','_{subsample}subsample.stss')
 coal_times = newick.replace('.newick','{subsample}.ctss')
 
 rule extract_times:
@@ -153,7 +157,8 @@ rule extract_times:
     ctss=coal_times
   threads: 1
   resources:
-    runtime=15
+    runtime=30
+  group: "times"
   run:
     # prevent numpy from using more than {threads} threads (useful for parallizing on my server)
     import os
@@ -189,8 +194,12 @@ rule extract_times:
             samples = [int(ts.node(node).metadata['name']) for node in ts.samples()] #get index of each sample in list we gave to relate
             sample_order = np.argsort(samples) #get indices to put in ascending order
             ordered_samples = [ts.samples()[i] for i in sample_order] #order samples as in relate
-            if wildcards.subsample == '_set03':
+            if wildcards.subsample == 'N':
+              ordered_samples = ordered_samples
+            elif wildcards.subsample == 'set03':
               ordered_samples = [j for i,j in enumerate(ordered_samples) if set03[i]==1]
+            else: 
+              ordered_samples = [j for i,j in enumerate(ordered_samples) if pop[i]!=int(wildcards.subsample)]
             sts = get_shared_times(tree, ordered_samples) #get shared times between all pairs of samples, with rows and columns ordered as in relate
             stss.write(",".join([str(i) for i in sts]) + '\n') #append as new line
  
@@ -216,7 +225,8 @@ rule process_times:
     expand(processed_times, end=ends, allow_missing=True)
   threads: 1 
   resources:
-    runtime=15
+    runtime=30
+  group: "times"
   run:
     # prevent numpy from using more than {threads} threads (useful for parallizing on my server)
     import os
@@ -308,7 +318,7 @@ rule process_times:
 
 # ----------------------- locate ancestors with weightless blup (no dispersal rate or numerical search needed) -----------------------
 
-ancestor_locations_blup = processed_times.replace('{end}','_{s}s_{t}t.blup_locs')
+ancestor_locations_blup = processed_times.replace('{end}','_{shuffle}shuffle.blup_locs')
 
 rule locate_ancestors_blup:
   input:
@@ -371,20 +381,19 @@ rule locate_ancestors_blup:
     stss_inv = stss_inv_mat
     #locations 
     locations = np.loadtxt(input.locations) #location of each sample
-    if wildcards.subsample == '_set03':
+    if wildcards.subsample == 'N':
+      locations = locations
+    elif wildcards.subsample == 'set03':
       locations = np.array([j for i,j in enumerate(locations) if set03[i]==1])
+    else: 
+      locations = np.array([j for i,j in enumerate(locations) if pop[i]!=int(wildcards.subsample)])
+    if wildcards.shuffle == 'Y':
+      rng = np.random.default_rng(2206)
+      rng.shuffle(locations, axis=0)
 
     # locate ancestors
-    s = wildcards.s
-    if s == 'All': #an option to locate the ancestors of all samples
-      samples = range(k+1)   
-    else:
-      samples = [int(s)]
-    t = wildcards.t
-    if t == 'All': #an option to locate at pretermined list of times 
-      times = ancestor_times
-    else: 
-      times = [float(t)]
+    samples = range(k+1)   
+    times = ancestor_times
     ancestor_locations = locate_ancestors(samples=samples, times=times, 
                                           shared_times_chopped=stss, shared_times_chopped_centered_inverted=stss_inv, locations=locations, 
                                           sample_times=sample_times, BLUP=True)
@@ -475,5 +484,7 @@ rule all:
   input:
 #    expand(anc, CHR=CHRS),
 #    locations,
-    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, s=['All'], t=['All'], subsample=['','_set03']),
+    expand(expand(ancestor_locations_blup, zip, CHR=CHRS_rep, locus=sampled_trees_chr, allow_missing=True), M=Ms, T=Ts, subsample=['0','1','2','3','23','24','37','38','42','46','47','60','61','62'], shuffle=['N']),
 
+# i ran many things on debugjob, but the below code also worked
+# snakemake --snakefile Snakefile-KL20 --jobs 62 --group-components times=192 blups=192 --profile slurm all 
